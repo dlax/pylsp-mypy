@@ -18,7 +18,7 @@ import subprocess
 import tempfile
 from configparser import ConfigParser
 from pathlib import Path
-from typing import IO, Any, Dict, List, Optional
+from typing import IO, Any, Dict, List, Optional, TypedDict, Union
 
 try:
     import tomllib
@@ -52,6 +52,15 @@ mypyConfigFileMap: Dict[str, Optional[str]] = {}
 settingsCache: Dict[str, Dict[str, Any]] = {}
 
 tmpFile: Optional[IO[bytes]] = None
+
+
+class DMypyState(TypedDict, total=False):
+    command: list[str]
+    status_file: str
+    pid: int
+
+
+dmypyState: DMypyState = {}
 
 # In non-live-mode the file contents aren't updated.
 # Returning an empty diagnostic clears the diagnostic result,
@@ -291,8 +300,14 @@ def get_diagnostics(
         log.warning("live_mode is not supported with dmypy, disabling")
         live_mode = False
 
+    dmypy_status_file: str
     if dmypy:
-        dmypy_status_file = settings.get("dmypy_status_file", ".dmypy.json")
+        try:
+            dmypy_status_file = dmypyState["status_file"]
+        except KeyError:
+            dmypyState["status_file"] = dmypy_status_file = settings.get(
+                "dmypy_status_file", ".dmypy.json"
+            )
 
     args = ["--show-error-end", "--no-error-summary", "--no-pretty"]
 
@@ -320,8 +335,6 @@ def get_diagnostics(
         args.append("--config-file")
         args.append(mypyConfigFile)
 
-    args.append(document.path)
-
     if settings.get("strict", False):
         args.append("--strict")
 
@@ -329,6 +342,7 @@ def get_diagnostics(
     exit_status = 0
 
     if not dmypy:
+        args.append(document.path)
         args.extend(["--incremental", "--follow-imports", settings.get("follow-imports", "silent")])
         args = apply_overrides(args, overrides)
 
@@ -357,7 +371,11 @@ def get_diagnostics(
         # If daemon is dead/absent, kill will no-op.
         # In either case, reset to fresh state
 
-        dmypy_command: List[str] = get_cmd(settings, "dmypy")
+        dmypy_command: List[str]
+        try:
+            dmypy_command = dmypyState["command"]  # type: ignore[assignment]
+        except KeyError:
+            dmypy_command = dmypyState["command"] = get_cmd(settings, "dmypy")
 
         if dmypy_command:
             # dmypy exists on PATH or was provided by settings
@@ -371,17 +389,29 @@ def get_diagnostics(
             errors = completed_process.stderr
             exit_status = completed_process.returncode
             if exit_status != 0:
+                dargs = [
+                    "dmypy",
+                    "--status-file",
+                    dmypy_status_file,
+                    "daemon",
+                    "--",
+                ] + apply_overrides(args, overrides)
+                action = "starting" if "pid" in dmypyState else "restarting"
                 log.info(
-                    "restarting dmypy from status: %s message: %s via path",
+                    "%s dmypy from status: %s message: %s via path, with args=%s",
+                    action,
                     exit_status,
                     errors.strip(),
+                    dargs,
                 )
-                subprocess.run(
-                    ["dmypy", "--status-file", dmypy_status_file, "restart"],
-                    capture_output=True,
+                proc = subprocess.Popen(
+                    dargs,
+                    stdout=subprocess.DEVNULL,
+                    # stderr=subprocess.DEVNULL,
                     **windows_flag,
-                    encoding="utf-8",
                 )
+                log.info("dmypy daemon started with PID=%d", proc.pid)
+                dmypyState["pid"] = proc.pid
         else:
             # dmypy does not exist on PATH and was not provided by settings,
             # but must exist in the env pylsp-mypy is installed in
@@ -395,14 +425,17 @@ def get_diagnostics(
                     exit_status,
                     errors.strip(),
                 )
-                mypy_api.run_dmypy(["--status-file", dmypy_status_file, "restart"])
+                mypy_api.run_dmypy(
+                    ["--status-file", dmypy_status_file, "daemon", "--"]
+                    + apply_overrides(args, overrides)
+                )
 
         # run to use existing daemon or restart if required
-        args = ["--status-file", dmypy_status_file, "run", "--"] + apply_overrides(args, overrides)
+        args = ["--status-file", dmypy_status_file, "check", document.path]
         if dmypy_command:
             # dmypy exists on PATH or was provided by settings
             # -> use this dmypy
-            log.info("dmypy run args = %s via path", args)
+            log.info("dmypy check args = %s via path", args)
             completed_process = subprocess.run(
                 [*dmypy_command, *args], capture_output=True, **windows_flag, encoding="utf-8"
             )
@@ -413,7 +446,7 @@ def get_diagnostics(
             # dmypy does not exist on PATH and was not provided by settings,
             # but must exist in the env pylsp-mypy is installed in
             # -> use dmypy via api
-            log.info("dmypy run args = %s via api", args)
+            log.info("dmypy check args = %s via api", args)
             report, errors, exit_status = mypy_api.run_dmypy(args)
 
     log.debug("report:\n%s", report)
@@ -665,3 +698,28 @@ def close() -> None:
     """
     if tmpFile and tmpFile.name:
         os.unlink(tmpFile.name)
+
+
+@atexit.register
+def dmypy_stop() -> None:
+    """Possibly stop dmypy."""
+    try:
+        status_file: str = dmypyState["status_file"]  # type: ignore[assignment]
+    except KeyError:
+        return
+    command = dmypyState.get("command")
+    status_file = os.path.abspath(status_file)
+    if command:
+        log.info("stopping dmypy (command=%s, status_file=%s)", command, status_file)
+        completed_process = subprocess.run(
+            [*command, "--status-file", status_file, "stop"],
+            capture_output=True,
+            **windows_flag,
+        )  # type: ignore[call-overload]
+        stdout = completed_process.stdout.rstrip()
+        stderr = completed_process.stderr.rstrip()
+        exit_status = completed_process.returncode
+    else:
+        log.info("stopping dmypy (status_file=%s)", status_file)
+        stdout, stderr, exit_status = mypy_api.run_dmypy(["--status-file", status_file, "stop"])
+    log.info("dmypy stopped with exit code=%d: stdout=%s, stderr=%s", exit_status, stdout, stderr)
