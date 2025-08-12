@@ -9,6 +9,7 @@ Created on Fri Jul 10 09:53:57 2020
 import ast
 import atexit
 import collections
+import json
 import logging
 import os
 import os.path
@@ -16,6 +17,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import time
 from configparser import ConfigParser
 from pathlib import Path
 from typing import IO, Any, Dict, List, Optional, TypedDict, Union
@@ -57,7 +59,6 @@ tmpFile: Optional[IO[bytes]] = None
 class DMypyState(TypedDict, total=False):
     command: list[str]
     status_file: str
-    pid: int
 
 
 dmypyState: DMypyState = {}
@@ -260,6 +261,16 @@ def pylsp_lint(
         return get_diagnostics(workspace, document, settings, is_saved)
 
 
+def daemon_process_exists(status_file: str) -> bool:
+    try:
+        with open(status_file) as f:
+            data = json.load(f)
+    except (FileNotFoundError, ValueError) as e:
+        log.error("failed to read dmypy status file %s: %s", status_file, e)
+        return False
+    return os.path.exists(f"/proc/{data['pid']}")
+
+
 def get_diagnostics(
     workspace: Workspace,
     document: Document,
@@ -389,6 +400,9 @@ def get_diagnostics(
             errors = completed_process.stderr
             exit_status = completed_process.returncode
             if exit_status != 0:
+                if "Daemon may be busy processing" in errors:
+                    log.warning("daemon is busy, skipping check")
+                    return []
                 dargs = [
                     "dmypy",
                     "--status-file",
@@ -396,7 +410,7 @@ def get_diagnostics(
                     "daemon",
                     "--",
                 ] + apply_overrides(args, overrides)
-                action = "starting" if "pid" in dmypyState else "restarting"
+                action = "starting" if daemon_process_exists(dmypy_status_file) else "restarting"
                 log.info(
                     "%s dmypy from status: %s message: %s via path, with args=%s",
                     action,
@@ -411,7 +425,9 @@ def get_diagnostics(
                     **windows_flag,
                 )
                 log.info("dmypy daemon started with PID=%d", proc.pid)
-                dmypyState["pid"] = proc.pid
+                while not os.path.exists(dmypy_status_file):
+                    log.debug("waiting for status file")
+                    time.sleep(0.1)
         else:
             # dmypy does not exist on PATH and was not provided by settings,
             # but must exist in the env pylsp-mypy is installed in
