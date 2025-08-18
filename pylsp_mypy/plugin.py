@@ -311,6 +311,8 @@ def get_diagnostics(
         log.warning("live_mode is not supported with dmypy, disabling")
         live_mode = False
 
+    dmypy_log_file: str = settings.get("dmypy_log_file", ".dmypy.log")
+
     dmypy_status_file: str
     if dmypy:
         try:
@@ -408,6 +410,8 @@ def get_diagnostics(
                     "--status-file",
                     dmypy_status_file,
                     "daemon",
+                    "--log-file",
+                    dmypy_log_file,
                     "--",
                 ] + apply_overrides(args, overrides)
                 action = "starting" if daemon_process_exists(dmypy_status_file) else "restarting"

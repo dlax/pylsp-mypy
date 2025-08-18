@@ -60,6 +60,11 @@ Configuration
      - ``string``
      - **Specifies which status file dmypy should use**. This modifies the ``--status-file`` option passed to ``dmypy`` given ``dmypy`` is active.
      - ``.dmypy.json``
+   * - ``dmypy_log_file``
+     - ``pylsp.plugins.pylsp_mypy.dmypy_log_file``
+     - ``string``
+     - **Specifies where dmypy log file**. This modifies the ``--log-file`` option passed to ``dmypy`` given ``dmypy`` is active.
+     - ``.dmypy.log``
    * - ``config_sub_paths``
      - ``pylsp.plugins.pylsp_mypy.config_sub_paths``
      - ``array`` of ``string`` items
