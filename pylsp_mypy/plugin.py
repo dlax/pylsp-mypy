@@ -384,6 +384,7 @@ def get_diagnostics(
         if dmypy_command:
             # dmypy exists on PATH or was provided by settings
             # -> use this dmypy
+            log.debug("checking dmypy status via path")
             completed_process = subprocess.run(
                 [*dmypy_command, "--status-file", dmypy_status_file, "status"],
                 capture_output=True,
@@ -396,21 +397,15 @@ def get_diagnostics(
                 if "Daemon may be busy processing" in errors:
                     log.warning("dmypy appears to be busy, skipping run for %s", document.path)
                     return [error_diag(severity=2, message=errors.strip())]
-                log.info(
-                    "restarting dmypy from status: %s message: %s via path",
-                    exit_status,
-                    errors.strip(),
-                )
-                subprocess.run(
-                    ["dmypy", "--status-file", dmypy_status_file, "restart"],
-                    capture_output=True,
-                    **windows_flag,
-                    encoding="utf-8",
-                )
+                elif not os.path.exists(dmypy_status_file):
+                    pass
+                else:
+                    log.warning("dmypy status: %s message: %s", exit_status, errors.strip())
         else:
             # dmypy does not exist on PATH and was not provided by settings,
             # but must exist in the env pylsp-mypy is installed in
             # -> use dmypy via api
+            log.debug("checking dmypy status via api")
             _, errors, exit_status = mypy_api.run_dmypy(
                 ["--status-file", dmypy_status_file, "status"]
             )
@@ -418,12 +413,10 @@ def get_diagnostics(
                 if "Daemon may be busy processing" in errors:
                     log.warning("dmypy appears to be busy, skipping run for %s", document.path)
                     return [error_diag(severity=2, message=errors.strip())]
-                log.info(
-                    "restarting dmypy from status: %s message: %s via api",
-                    exit_status,
-                    errors.strip(),
-                )
-                mypy_api.run_dmypy(["--status-file", dmypy_status_file, "restart"])
+                elif not os.path.exists(dmypy_status_file):
+                    pass
+                else:
+                    log.warning("dmypy status: %s message: %s", exit_status, errors.strip())
 
         # run to use existing daemon or restart if required
         args = ["--status-file", dmypy_status_file, "run", "--"] + apply_overrides(args, overrides)
