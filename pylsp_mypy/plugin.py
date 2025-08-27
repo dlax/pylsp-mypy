@@ -257,6 +257,22 @@ def pylsp_lint(
         return get_diagnostics(workspace, document, settings, is_saved)
 
 
+def error_diag(*, severity: int, message: str) -> dict[str, Any]:
+    """Return a Diagnostic value applying to the first line of the document and
+    meant to convey an error message with specified severity.
+    """
+    return {
+        "range": {
+            "start": {"line": 0, "character": 0},
+            # Client is supposed to clip end column to line length.
+            "end": {"line": 0, "character": 1000},
+        },
+        "severity": severity,
+        "source": "mypy",
+        "message": message,
+    }
+
+
 def get_diagnostics(
     workspace: Workspace,
     document: Document,
@@ -377,6 +393,9 @@ def get_diagnostics(
             errors = completed_process.stderr
             exit_status = completed_process.returncode
             if exit_status != 0:
+                if "Daemon may be busy processing" in errors:
+                    log.warning("dmypy appears to be busy, skipping run for %s", document.path)
+                    return [error_diag(severity=2, message=errors.strip())]
                 log.info(
                     "restarting dmypy from status: %s message: %s via path",
                     exit_status,
@@ -396,6 +415,9 @@ def get_diagnostics(
                 ["--status-file", dmypy_status_file, "status"]
             )
             if exit_status != 0:
+                if "Daemon may be busy processing" in errors:
+                    log.warning("dmypy appears to be busy, skipping run for %s", document.path)
+                    return [error_diag(severity=2, message=errors.strip())]
                 log.info(
                     "restarting dmypy from status: %s message: %s via api",
                     exit_status,
@@ -430,16 +452,10 @@ def get_diagnostics(
     # Expose generic mypy error on the first line.
     if errors:
         diagnostics.append(
-            {
-                "source": "mypy",
-                "range": {
-                    "start": {"line": 0, "character": 0},
-                    # Client is supposed to clip end column to line length.
-                    "end": {"line": 0, "character": 1000},
-                },
-                "message": errors,
-                "severity": 1 if exit_status != 0 else 2,  # Error if exited with error or warning.
-            }
+            error_diag(
+                severity=1 if exit_status != 0 else 2,  # Error if exited with error or warning.
+                message=errors,
+            )
         )
 
     for line in report.splitlines():
