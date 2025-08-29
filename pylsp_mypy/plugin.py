@@ -257,6 +257,22 @@ def pylsp_lint(
         return get_diagnostics(workspace, document, settings, is_saved)
 
 
+def error_diag(*, severity: int, message: str) -> dict[str, Any]:
+    """Return a Diagnostic value applying to the first line of the document and
+    meant to convey an error message with specified severity.
+    """
+    return {
+        "range": {
+            "start": {"line": 0, "character": 0},
+            # Client is supposed to clip end column to line length.
+            "end": {"line": 0, "character": 1000},
+        },
+        "severity": severity,
+        "source": "mypy",
+        "message": message,
+    }
+
+
 def get_diagnostics(
     workspace: Workspace,
     document: Document,
@@ -369,6 +385,7 @@ def get_diagnostics(
         if dmypy_command:
             # dmypy exists on PATH or was provided by settings
             # -> use this dmypy
+            log.debug("checking dmypy status via path")
             completed_process = subprocess.run(
                 [*dmypy_command, "--status-file", dmypy_status_file, "status"],
                 capture_output=True,
@@ -378,31 +395,29 @@ def get_diagnostics(
             errors = completed_process.stderr
             exit_status = completed_process.returncode
             if exit_status != 0:
-                log.info(
-                    "restarting dmypy from status: %s message: %s via path",
-                    exit_status,
-                    errors.strip(),
-                )
-                subprocess.run(
-                    ["dmypy", "--status-file", dmypy_status_file, "restart"],
-                    capture_output=True,
-                    **windows_flag,
-                    encoding="utf-8",
-                )
+                if "Daemon may be busy processing" in errors:
+                    log.warning("dmypy appears to be busy, skipping run for %s", document.path)
+                    return [error_diag(severity=2, message=errors.strip())]
+                elif not os.path.exists(dmypy_status_file):
+                    pass
+                else:
+                    log.warning("dmypy status: %s message: %s", exit_status, errors.strip())
         else:
             # dmypy does not exist on PATH and was not provided by settings,
             # but must exist in the env pylsp-mypy is installed in
             # -> use dmypy via api
+            log.debug("checking dmypy status via api")
             _, errors, exit_status = mypy_api.run_dmypy(
                 ["--status-file", dmypy_status_file, "status"]
             )
             if exit_status != 0:
-                log.info(
-                    "restarting dmypy from status: %s message: %s via api",
-                    exit_status,
-                    errors.strip(),
-                )
-                mypy_api.run_dmypy(["--status-file", dmypy_status_file, "restart"])
+                if "Daemon may be busy processing" in errors:
+                    log.warning("dmypy appears to be busy, skipping run for %s", document.path)
+                    return [error_diag(severity=2, message=errors.strip())]
+                elif not os.path.exists(dmypy_status_file):
+                    pass
+                else:
+                    log.warning("dmypy status: %s message: %s", exit_status, errors.strip())
 
         # run to use existing daemon or restart if required
         runargs = ["--status-file", dmypy_status_file, "run"]
@@ -434,16 +449,10 @@ def get_diagnostics(
     # Expose generic mypy error on the first line.
     if errors:
         diagnostics.append(
-            {
-                "source": "mypy",
-                "range": {
-                    "start": {"line": 0, "character": 0},
-                    # Client is supposed to clip end column to line length.
-                    "end": {"line": 0, "character": 1000},
-                },
-                "message": errors,
-                "severity": 1 if exit_status != 0 else 2,  # Error if exited with error or warning.
-            }
+            error_diag(
+                severity=1 if exit_status != 0 else 2,  # Error if exited with error or warning.
+                message=errors,
+            )
         )
 
     for line in report.splitlines():
